@@ -1,0 +1,187 @@
+#!/usr/bin/python3
+import sys
+import socket
+from html.parser import HTMLParser
+import ssl
+import re
+import threading
+
+RECV_SIZE = 1024
+secretFlags = []
+sent = []
+
+class Crawler:
+    def __init__(self, username, password):
+        self.username = username
+        self.password = password
+        self.port = 443
+        self.hostname =  'fakebook.3700.network'
+        self.sessionID = ''
+        self.cookie = ''
+        self.socket = None
+        self.willSend = []
+
+    """ start the server with TCP connection to socket"""
+    def initServer(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        #wrap the socket
+        context = ssl.create_default_context()
+        sock = socket.create_connection((self.hostname, self.port))
+        self.socket = context.wrap_socket(sock, server_hostname=self.hostname)
+
+    """ Use the password and username to login to the Fakebook server"""
+    def loginServer(self):
+        response = self.sendGetRequest('/accounts/login/')
+        self.setCookie(response)
+        request = self.LoginMessage()
+        self.socket.sendall(request.encode())
+        response = self.socket.recv(RECV_SIZE).decode()
+        self.setCookie(response)
+
+    """ Crawl the website"""
+    def crawl(self):
+        global secretFlags
+        global sent
+
+        self.willSend +=['/fakebook/']
+
+        while len(secretFlags) < 5:
+            if len(self.willSend) == 0:
+                self.willSend +=['/fakebook/']
+            try:
+                path = self.willSend[0]
+                del self.willSend[0]
+                response = self.sendGetRequest(path)
+                self.setCookie(response)
+                status = self.returnStatus(response)
+                sent += [path]
+                if status == 200:
+                    self.findURLs(response)
+                    self.findSecretFlag(response)
+                elif status == 302:
+                    self.redirect(response)
+                elif status == 403 or status == 404 or status == 500:
+                    continue
+            #if the server ended, restart the server and relogin
+            except Exception:
+                self.initServer()
+                self.loginServer()
+
+    """ Send the Get Request to get the info from the given path """
+    def sendGetRequest(self, path):
+        request = "GET " + path + " HTTP/1.1\r\nHost: " + self.hostname
+        request += "\r\nCookie: csrftoken=" + self.cookie + "; sessionid="
+        request += self.sessionID + ";\r\nConnection:keep-alive\r\n\r\n"
+        self.socket.sendall(request.encode())
+        response = self.socket.recv(RECV_SIZE).decode()
+        if '<!DOCTYPE html' in response:
+            while '</html>' not in response:
+                response += self.socket.recv(RECV_SIZE).decode()
+        return response
+
+    """ extract the csrftoken and sessionID from the given response"""
+    def setCookie(self, response):
+        if 'csrftoken=' in response:
+            temp = response.split('csrftoken=')
+            temp = temp[1].split(';')
+            csrftoken = temp[0]
+            self.cookie = csrftoken
+        if 'sessionid=' in response:
+            temp2 = response.split('sessionid=')
+            temp2 = temp2[1].split(';')
+            sessionID = temp2[0]
+            if sessionID == '""':
+                self.sessionID = ''
+            else:
+                self.sessionID = sessionID
+
+    """ return the login message sent to the server"""
+    def LoginMessage(self):
+        content = "csrfmiddlewaretoken=" + self.cookie + "&username="
+        content += self.username + "&password=" + self.password
+        content += "&next=%2Ffakebook%2F"
+        request = 'POST /accounts/login/?next=/fakebook/ HTTP/1.1\r\nHost: ' + self.hostname
+        request += '\r\nReferrer: ' + self.hostname + '/accounts/login/\r\n'
+        request += 'Cookie: csrftoken=' + self.cookie + '; sessionid='
+        request += self.sessionID + '\r\nContent-Type: '
+        request += 'application/x-www-form-urlencoded\r\nContent-Length: '
+        request += str(len(content)) + "\r\nConnection:keep-alive\r\n\r\n"
+        request += content + "\r\n"
+        return request
+
+    """
+    find all the valid urls from the given response, meaning the url is start
+    with /fakebook/, for all urls found, if it is already being crawled
+    ignore, else add it to the list
+    """
+    def findURLs(self, response):
+        global sent
+        urls = set(re.findall('href=[\'"]?(/fakebook/[^\'" >]+)', response))
+        urls = list(urls)
+        for url in urls:
+            if url in sent:
+                continue
+            else:
+                self.willSend = [url] + self.willSend
+
+    """
+    check if the response contain the secret flag, if so add the flag to the list
+    """
+    def findSecretFlag(self, response):
+        global secretFlags
+        if "FLAG" in response:
+            flags = re.findall('FLAG: ([^\'\" ><]+)', response)
+            for flag in flags:
+                if flag not in secretFlags:
+                    secretFlags += [flag]
+                    print(flag)
+
+    """
+    if it is 302 status, extract the redirect url from Location title and
+    add it to the running list
+    """
+    def redirect(self, response):
+        response = response.split('Location: ')
+        response = response[1].split('\n')
+        redirectPath = response[0].split('\r')[0]
+        self.willSend = [redirectPath] + self.willSend
+
+    """
+    extract the status out of the given response
+    """
+    def returnStatus(self, response):
+        if '200 OK' in response:
+            return 200
+        elif '302 Found' in response:
+            return 302
+        elif '403 Forbiden' in response:
+            return 403
+        elif '404 Not Found' in response:
+            return 404
+        elif '500 Internal Server Error' in response:
+            return 500
+
+"""
+main function to run the crawler
+"""
+def main(username, password):
+    crawler = Crawler(username, password)
+    crawler.initServer()
+    crawler.loginServer()
+    crawler.crawl()
+
+if __name__ == '__main__':
+    username = sys.argv[1]
+    password = sys.argv[2]
+    #Since to not overload the server, I only used 5 thread, making the
+    #program slower, which takes about 5 minutes to run
+    thread1 = threading.Thread(target=main, args=(username, password,))
+    thread2 = threading.Thread(target=main, args=(username, password,))
+    thread3 = threading.Thread(target=main, args=(username, password,))
+    thread4 = threading.Thread(target=main, args=(username, password,))
+    thread5 = threading.Thread(target=main, args=(username, password,))
+    thread1.start()
+    thread2.start()
+    thread3.start()
+    thread4.start()
+    thread5.start()
